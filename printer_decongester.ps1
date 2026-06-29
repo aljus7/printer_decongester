@@ -7,29 +7,66 @@ if (-Not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     }
 }
 
-$filesPrint = Get-ChildItem -Path "C:\Windows\System32\spool\PRINTERS\" -Recurse
 Write-Host "SHELL WILL CLOSE AUTOMATICALLY!!" -ForegroundColor Yellow
+$closeAllKnown = $false;
+
+$printProcesses = @(
+    "PrintIsolationHost",
+    "PrintWorkflowUserSvc",
+    "PrintWorkflowService",
+    "PrintPipelineHost",
+    "printfilterpipelinesvc"
+)
+
+$handleAvailable = $false;
+if (-not (Get-Command handle.exe -ErrorAction SilentlyContinue)) {
+    Write-Host "handle.exe not found — skipping handle-based detection." -ForegroundColor Red
+} else {
+    $handleAvailable = $true
+}
 
 $retry = 3
 while($retry -gt 0) {
+    $filesPrint = Get-ChildItem -Path "C:\Windows\System32\spool\PRINTERS\" -Recurse
     $can_break = $false
     Stop-Service -Name Spooler -ErrorAction SilentlyContinue  
     if ($?) {
-        if ($retry -lt 2) {
-            if($retry -eq 2) {
-                Write-Output "Taking drastic measures, closing processes that own files!" -ForegroundColor Yellow
-            }
-            foreach ($file in $filesPrint) {
-                $output = handle -accepteula $file.FullName
+        if ($retry -eq 2 -and $handleAvailable) {
+            Write-Host "Taking drastic measures, closing processes that own files!" -ForegroundColor Yellow
+            if ($handleAvailable) {
+                foreach ($file in $filesPrint) {
+                    $output = handle.exe -accepteula $file.FullName
+                    $pidMatches = ($output | Select-String -Pattern "pid:\s+(\d+)").Matches
+                    if ($pidMatches.Count -gt 0) {
+                        $piid = $pidMatches[0].Groups[1].Value
+                        # Get process name
+                        $proc = Get-Process -Id $piid -ErrorAction SilentlyContinue
+                        Write-Host "File: $($file.FullName) is being used by PID: $piid, Process: $proc.Name" -ForegroundColor Yellow
 
-                if ($output -match "pid: (\d+)") {
-                    $pid = $matches[1]
-                    Write-Output "File: $($file.FullName) is being used by Process ID: $pid" -ForegroundColor Yellow
-
-                    Stop-Process -Id $pid -Force
-                    Write-Output "Terminated Process ID: $pid" -ForegroundColor Orange
-                } else {
-                    Write-Output "File: $file is not used by any process" -ForegroundColor Yellow
+                        if ($printProcesses -contains $proc.Name -and $closeAllKnown -eq $false) {
+                            Write-Host "This is one of the print pipeline processes\n Do you want to terminate all knows safe processes?" -ForegroundColor Cyan
+                            $response = Read-Host "Terminate process $piid? (Y/N)"
+                            if ($response -match "^[Yy]$") {
+                                $closeAllKnown = $true
+                            }
+                        }
+                        $response = "";
+                        if ($closeAllKnown -eq $true -and $printProcesses -contains $proc.Name) {
+                            $response = "Y";
+                        }
+                        if ($response -eq "") {
+                            $response = Read-Host "Terminate process $piid? (Y/N)"
+                        }
+                        if ($response -match "^[Yy]$") {
+                            Stop-Process -Id $piid -Force
+                            Write-Host "Terminated Process ID: $piid" -ForegroundColor Orange
+                        } else {
+                            Write-Host "Skipped terminating PID: $piid" -ForegroundColor Cyan
+                        }
+                    }
+                    else {
+                        Write-Host "File: $($file.FullName) is not used by any process" -ForegroundColor Yellow
+                    }
                 }
             }
         }
@@ -45,7 +82,7 @@ while($retry -gt 0) {
     }
     Start-Service -Name Spooler -ErrorAction SilentlyContinue 
     if ($?) {
-        Write-Host "Sucess, restarted spooler service" -ForegroundColor Green
+        Write-Host "Restarted spooler service" -ForegroundColor Green
         Start-Sleep -Seconds 3
     }
     else {
